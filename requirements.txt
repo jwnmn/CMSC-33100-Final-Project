@@ -24,3 +24,4 @@ gdown
 typing-extensions
 qdrant-client
 fastembed
+rsa>=4.9

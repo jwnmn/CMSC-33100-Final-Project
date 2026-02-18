@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 import hashlib
 import threading
 import requests
+import rsa
+import base64
 
 from .vector_db import get_vector_db
 from aios.config.config_manager import config as global_config
@@ -32,10 +34,17 @@ class FileChangeHandler(FileSystemEventHandler):
             self.lsfs.handle_file_change(event.src_path, "deleted")
 
 class LSFS:
-    def __init__(self, root_dir, use_vector_db=True, max_versions=20):
+    def __init__(self, root_dir, use_vector_db=True, max_versions=20, use_encryption=False, rsa_key_size=2048):
         self.root_dir = root_dir
         self.use_vector_db = use_vector_db
         self.max_versions = max_versions
+        self.use_encryption = use_encryption
+        self.rsa_key_size = rsa_key_size
+        
+        # Initialize RSA keys if encryption is enabled
+        if self.use_encryption:
+            self._initialize_rsa_keys()
+        
         global_config.get_storage_config() or {}
         self.vector_db = get_vector_db(mount_dir=self.root_dir)
 
@@ -67,6 +76,65 @@ class LSFS:
         self.file_locks = {}
         self.locks_lock = threading.Lock()  # Meta-lock for the locks dictionary
 
+    def _initialize_rsa_keys(self):
+        """Initialize RSA key pair for encryption/decryption."""
+        print(f"Generating RSA keys with key size: {self.rsa_key_size}...")
+        (self.public_key, self.private_key) = rsa.newkeys(self.rsa_key_size)
+        print("RSA keys generated successfully")
+
+    def _encrypt_content(self, content: str) -> str:
+        """Encrypt content using RSA public key.
+        
+        For large content, RSA has size limitations, so we encrypt in chunks.
+        Returns base64 encoded encrypted data.
+        """
+        if not self.use_encryption:
+            return content
+        
+        try:
+            # RSA can only encrypt data smaller than the key size
+            # For 2048-bit key, max chunk size is typically 245 bytes (2048/8 - 11 for padding)
+            max_chunk_size = (self.rsa_key_size // 8) - 11
+            
+            content_bytes = content.encode('utf-8')
+            encrypted_chunks = []
+            
+            # Encrypt content in chunks
+            for i in range(0, len(content_bytes), max_chunk_size):
+                chunk = content_bytes[i:i + max_chunk_size]
+                encrypted_chunk = rsa.encrypt(chunk, self.public_key)
+                encrypted_chunks.append(base64.b64encode(encrypted_chunk).decode('utf-8'))
+            
+            # Join chunks with a delimiter
+            return '|||'.join(encrypted_chunks)
+        except Exception as e:
+            print(f"Encryption error: {str(e)}")
+            return content
+
+    def _decrypt_content(self, encrypted_content: str) -> str:
+        """Decrypt content using RSA private key.
+        
+        Decrypts chunked content and returns original string.
+        """
+        if not self.use_encryption:
+            return encrypted_content
+        
+        try:
+            # Split the encrypted chunks
+            encrypted_chunks = encrypted_content.split('|||')
+            decrypted_parts = []
+            
+            # Decrypt each chunk
+            for chunk in encrypted_chunks:
+                encrypted_data = base64.b64decode(chunk.encode('utf-8'))
+                decrypted_chunk = rsa.decrypt(encrypted_data, self.private_key)
+                decrypted_parts.append(decrypted_chunk)
+            
+            # Combine decrypted chunks
+            return b''.join(decrypted_parts).decode('utf-8')
+        except Exception as e:
+            print(f"Decryption error: {str(e)}")
+            return encrypted_content
 
     def __del__(self):
         if hasattr(self, 'observer'):
@@ -95,18 +163,22 @@ class LSFS:
                         with open(file_path, 'r') as f:
                             content = f.read()
 
-                        # Update vector DB
+                        # Update vector DB (always store unencrypted in vector DB for searching)
                         if self.use_vector_db:
                             self.vector_db.update_document(file_path, content)
 
                         # Update Redis cache with version history
                         timestamp = datetime.now().isoformat()
+                        
+                        # Encrypt content for Redis storage
+                        encrypted_content = self._encrypt_content(content)
 
                         version_info = {
-                            'content': content,
+                            'content': encrypted_content,
                             'timestamp': timestamp,
                             'hash': file_hash,
-                            'change_type': change_type
+                            'change_type': change_type,
+                            'encrypted': self.use_encryption
                         }
 
                         # versions_key = f"file_versions:{relative_path}"
@@ -173,8 +245,13 @@ class LSFS:
             if 'content' not in version_info:
                 return False
 
+            # Decrypt content if it was encrypted
+            content = version_info['content']
+            if version_info.get('encrypted', False):
+                content = self._decrypt_content(content)
+
             with open(file_path, 'w') as f:
-                f.write(version_info['content'])
+                f.write(content)
 
             # Update vector DB
             # if self.use_vector_db:
@@ -310,7 +387,11 @@ class LSFS:
             return response
 
     def sto_write(self, file_name: str, file_path: str, content: str, collection_name: str = None) -> str:
-        """Write to file with proper lock management."""
+        """Write to file with proper lock management.
+        
+        Note: Files on disk are stored unencrypted for compatibility.
+        Encryption is applied to Redis version history only.
+        """
         if file_path is None:
             file_path = os.path.join(self.root_dir, file_name)
 
@@ -318,10 +399,12 @@ class LSFS:
         try:
             if lock.acquire(timeout=10):  # Add timeout to prevent deadlocks
                 try:
+                    # Write unencrypted to disk (encryption only for Redis storage)
                     with open(file_path, 'w') as f:
                         f.write(content)
 
-                    return f"Content has been written to file: {file_path}"
+                    encryption_note = " (Redis version history encrypted)" if self.use_encryption else ""
+                    return f"Content has been written to file: {file_path}{encryption_note}"
                 finally:
                     lock.release()  # Ensure lock is always released
             else:
