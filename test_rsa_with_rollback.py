@@ -83,6 +83,23 @@ def test_write(storage, data_size_kb, num_iterations=10):
     
     return sum(times) / len(times)
 
+def test_read(storage, data_size_kb, num_iterations=10):
+    """Test reading (retrieving and decrypting current version)."""
+    content = "X" * (data_size_kb * 1024)
+    file_path = f"read_{data_size_kb}.txt"
+    
+    # Write a version first
+    storage.write_version(file_path, content)
+    
+    times = []
+    for i in range(num_iterations):
+        start = time.time()
+        # Read current version (index 0)
+        restored = storage.rollback(file_path, version_index=0)
+        times.append(time.time() - start)
+    
+    return sum(times) / len(times)
+
 def test_rollback(storage, data_size_kb, num_iterations=10):
     """Test rollback (retrieving and decrypting old version)."""
     content = "X" * (data_size_kb * 1024)
@@ -104,7 +121,7 @@ def run_complete_test():
     """Run complete test matching Fernet format."""
     print("=" * 75)
     print("RSA ENCRYPTION PERFORMANCE TEST")
-    print("Testing Write and Rollback operations")
+    print("Testing Write, Read, and Rollback operations")
     print("=" * 75)
     
     file_sizes = [10, 100]
@@ -120,12 +137,14 @@ def run_complete_test():
     for size in file_sizes:
         print(f"  {size}KB...", end=" ")
         write_time = test_write(storage_no_enc, size)
+        read_time = test_read(storage_no_enc, size)
         rollback_time = test_rollback(storage_no_enc, size)
         results['no_encryption'][size] = {
             'write': write_time,
+            'read': read_time,
             'rollback': rollback_time
         }
-        print(f"Write: {write_time:.6f}s, Rollback: {rollback_time:.6f}s")
+        print(f"Write: {write_time:.6f}s, Read: {read_time:.6f}s, Rollback: {rollback_time:.6f}s")
     
     # Test 2: RSA-2048 Encryption
     print("\n[2/2] Testing WITH RSA-2048 encryption...")
@@ -134,12 +153,14 @@ def run_complete_test():
     for size in file_sizes:
         print(f"  {size}KB...", end=" ")
         write_time = test_write(storage_rsa, size)
+        read_time = test_read(storage_rsa, size)
         rollback_time = test_rollback(storage_rsa, size)
         results['rsa_2048'][size] = {
             'write': write_time,
+            'read': read_time,
             'rollback': rollback_time
         }
-        print(f"Write: {write_time:.6f}s, Rollback: {rollback_time:.6f}s")
+        print(f"Write: {write_time:.6f}s, Read: {read_time:.6f}s, Rollback: {rollback_time:.6f}s")
     
     # Summary Table - Format for your report
     print("\n" + "=" * 75)
@@ -155,7 +176,18 @@ def run_complete_test():
     print(f"{'RSA-2048':<30} "
           f"{results['rsa_2048'][10]['write']:.6f}s{'':<12} "
           f"{results['rsa_2048'][100]['write']:.6f}s")
-    print(f"{'Fernet (your friend)':<30} {'[insert here]':<20} {'[insert here]':<20}")
+    print(f"{'Fernet (your friend)':<30} {'[0.0005s]':<20} {'[0.0002s]':<20}")
+    
+    # Read operations
+    print(f"\n{'READ Operations':<30} {'10KB':<20} {'100KB':<20}")
+    print("-" * 70)
+    print(f"{'No Encryption':<30} "
+          f"{results['no_encryption'][10]['read']:.6f}s{'':<12} "
+          f"{results['no_encryption'][100]['read']:.6f}s")
+    print(f"{'RSA-2048':<30} "
+          f"{results['rsa_2048'][10]['read']:.6f}s{'':<12} "
+          f"{results['rsa_2048'][100]['read']:.6f}s")
+    print(f"{'Fernet (your friend)':<30} {'[ask friend]':<20} {'[ask friend]':<20}")
     
     # Rollback operations
     print(f"\n{'ROLLBACK Operations':<30} {'10KB':<20} {'100KB':<20}")
@@ -166,7 +198,7 @@ def run_complete_test():
     print(f"{'RSA-2048':<30} "
           f"{results['rsa_2048'][10]['rollback']:.6f}s{'':<12} "
           f"{results['rsa_2048'][100]['rollback']:.6f}s")
-    print(f"{'Fernet (your friend)':<30} {'[insert here]':<20} {'[insert here]':<20}")
+    print(f"{'Fernet (your friend)':<30} {'[0.0004s]':<20} {'[ask friend]':<20}")
     
     # Performance overhead
     print("\n" + "=" * 75)
@@ -176,7 +208,7 @@ def run_complete_test():
     print(f"\n{'Operation':<20} {'10KB Slowdown':<25} {'100KB Slowdown':<25}")
     print("-" * 70)
     
-    for op in ['write', 'rollback']:
+    for op in ['write', 'read', 'rollback']:
         overhead_10 = results['rsa_2048'][10][op] / results['no_encryption'][10][op]
         overhead_100 = results['rsa_2048'][100][op] / results['no_encryption'][100][op]
         
@@ -184,12 +216,11 @@ def run_complete_test():
         print(f"{op_name:<20} {overhead_10:.1f}x slower{'':<14} {overhead_100:.1f}x slower")
     
     print("\n" + "=" * 75)
-    print("WHAT IS ROLLBACK?")
+    print("OPERATION DEFINITIONS")
     print("-" * 75)
-    print("Rollback = Restoring a file to a previous version from storage")
-    print("  - In LSFS: Retrieves old version from Redis and restores it")
-    print("  - With encryption: Must decrypt the old version")
-    print("  - Tests read + decrypt performance for version history")
+    print("• WRITE    = Encrypt content and store new version")
+    print("• READ     = Retrieve and decrypt current version")
+    print("• ROLLBACK = Retrieve and decrypt old version (version history)")
     print("=" * 75 + "\n")
 
 if __name__ == "__main__":
